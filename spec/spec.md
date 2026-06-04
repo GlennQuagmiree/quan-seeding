@@ -139,11 +139,11 @@ Hậu quả của việc sai (gắn cờ nhầm một quán ngon) là đáng k�
 
 | Thành viên | Phụ trách |
 |---|---|
-| **[Tên thành viên 1]** | Thu thập dữ liệu, crawl Google Maps, xây dựng dataset `reviews_ha_noi_output.csv`; viết `crawler.py` tích hợp Apify |
-| **[Tên thành viên 2]** | Huấn luyện mô hình ML: Random Forest + SBERT (`seeding_review_classifier.ipynb`); tối ưu feature engineering |
-| **[Tên thành viên 3]** | Xây dựng giao diện Streamlit (`app.py`): UI/UX, sidebar, chart, custom CSS; tích hợp LLM Agent Gemini/Anthropic |
-| **[Tên thành viên 4]** | Huấn luyện mô hình XGBoost + TF-IDF; đánh giá ensemble; viết kịch bản demo |
-| **[Tất cả thành viên]** | Viết SPEC, kiểm thử end-to-end, chuẩn bị slides demo |
+| **Tất cả thành viên** | Thu thập dữ liệu, crawl Google Maps, xây dựng dataset `reviews_ha_noi_output.csv`; viết `crawler.py` tích hợp Apify |
+| **Hà Kế Đức Trung - 2A202600594** | Huấn luyện mô hình ML: Random Forest + SBERT (`seeding_review_classifier.ipynb`); tối ưu feature engineering |
+| **Lâm Văn Tài - 2A202600938 / Đặng Thị Thu Thảo - 2A202600685** | Xây dựng giao diện Streamlit (`app.py`): UI/UX, sidebar, chart, custom CSS; tích hợp LLM Agent Gemini/Anthropic |
+| **Nguyễn Đăng Huy - 2A202600641** | Huấn luyện mô hình XGBoost + TF-IDF; đánh giá ensemble; viết kịch bản demo |
+| **Tất cả thành viên** | Viết SPEC, kiểm thử end-to-end, chuẩn bị slides demo |
 
 > *Cập nhật tên thành viên thực tế và mã học viên vào bảng trên.*
 
