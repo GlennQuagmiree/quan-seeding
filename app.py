@@ -1,8 +1,15 @@
 import os
 import time
-from dotenv import load_dotenv
-load_dotenv()  # Load biến từ file .env
 import joblib
+
+# Tự đọc .env không cần package dotenv
+_env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if os.path.exists(_env_path):
+    for _line in open(_env_path, encoding="utf-8"):
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 import pandas as pd
 import numpy as np
 import streamlit as st
