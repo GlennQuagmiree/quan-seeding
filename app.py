@@ -215,7 +215,10 @@ def _predict_xgb(df, texts):
     """TF-IDF + XGBoost prediction. Returns prob array."""
     tfidf, xgb = load_xgb_pipeline()
     # Dùng reviewer_photo_count thực nếu có trong df, fallback về median 3
-    photo_col = pd.to_numeric(df.get('reviewer_photo_count', pd.Series(dtype=float)), errors='coerce').fillna(3)
+    if 'reviewer_photo_count' in df.columns:
+        photo_col = pd.to_numeric(df['reviewer_photo_count'], errors='coerce').fillna(3)
+    else:
+        photo_col = pd.Series([3] * len(df), index=df.index)
     tmp = pd.DataFrame({
         'text':                  texts,
         'rating':                pd.to_numeric(df['review_rating'], errors='coerce').fillna(3),
@@ -273,14 +276,27 @@ if 'crawled_predicted' not in st.session_state:
     st.session_state.crawled_predicted = {}   # {restaurant_name: DataFrame}
 if 'last_crawled' not in st.session_state:
     st.session_state.last_crawled = None
+if 'selected_restaurant_key' not in st.session_state:
+    st.session_state.selected_restaurant_key = None  # tên quán được chọn tự động sau crawl
 
 # Merge crawled data vào df_all nếu có
 if st.session_state.crawled_predicted:
     extra_dfs = list(st.session_state.crawled_predicted.values())
     df_all = pd.concat([df_all] + extra_dfs, ignore_index=True)
 
-# Get the list of unique restaurants (bao gồm cả crawled)
-restaurant_list = sorted(df_all['restaurant_name'].unique().tolist())
+# Xây danh sách quán: quán mới crawl lên đầu, còn lại sắp xếp alpha
+_base_list = sorted(df_all['restaurant_name'].unique().tolist())
+_crawled_names = list(st.session_state.crawled_predicted.keys())
+# Đảo ngược để quán crawl gần nhất lên đầu tiên
+_top = [n for n in reversed(_crawled_names) if n in _base_list]
+_rest = [n for n in _base_list if n not in _top]
+restaurant_list = _top + _rest
+
+# Tính index mặc định cho selectbox
+if st.session_state.selected_restaurant_key and st.session_state.selected_restaurant_key in restaurant_list:
+    _default_index = restaurant_list.index(st.session_state.selected_restaurant_key)
+else:
+    _default_index = 0
 
 # -----------------------------------------------------------------------------
 # 3. LLM AGENT INTEGRATION (WITH MOCK RESPONSE)
@@ -403,7 +419,7 @@ with st.sidebar:
     selected_restaurant = st.selectbox(
         "Chọn quán ăn cần quét:",
         options=restaurant_list,
-        index=0,
+        index=_default_index,
         help="Danh sách các quán ăn lấy trực tiếp từ cơ sở dữ liệu reviews."
     )
     
@@ -494,9 +510,10 @@ with st.sidebar:
                         df_predicted = predict_new_reviews(df_crawled)
                         st.session_state.crawled_predicted[name] = df_predicted
                         st.session_state.last_crawled = name
+                        st.session_state.selected_restaurant_key = name  # tự động chọn quán mới
                         st.success(
                             f"✅ Đã thêm **{name}** ({len(df_predicted)} reviews). "
-                            "Chọn quán ở trên để phân tích!"
+                            "Đang chuyển sang phân tích..."
                         )
                         st.rerun()
                     except Exception as crawl_err:
