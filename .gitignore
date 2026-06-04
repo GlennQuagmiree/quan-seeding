@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+streamlit_output.log
+
+# Streamlit secrets (KHÔNG push secrets lên GitHub!)
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Model files (lớn, nên dùng Git LFS hoặc bỏ qua)
+# Bỏ comment dòng dưới nếu không muốn push model lên GitHub:
+# *.pkl
