@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import joblib
 
@@ -12,6 +13,7 @@ if os.path.exists(_env_path):
             os.environ.setdefault(_k.strip(), _v.strip())
 import pandas as pd
 import numpy as np
+from scipy.sparse import hstack, csr_matrix
 import streamlit as st
 from sentence_transformers import SentenceTransformer
 from crawler import crawl_restaurant, is_cached_today
@@ -95,54 +97,112 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 # 2. LOAD DATA AND MODELS WITH STREAMLIT CACHING
 # -----------------------------------------------------------------------------
-# Paths to assets
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(BASE_DIR, "reviews_ha_noi_output.csv")
-MODEL_PATH = os.path.join(BASE_DIR, "random_forest_seeding.pkl")
-SCALER_PATH = os.path.join(BASE_DIR, "metadata_scaler.pkl")
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+CSV_PATH    = os.path.join(BASE_DIR, "reviews_ha_noi_output.csv")
+MODEL_PATH  = os.path.join(BASE_DIR, "models", "random_forest_seeding.pkl")
+SCALER_PATH = os.path.join(BASE_DIR, "models", "metadata_scaler.pkl")
+TFIDF_PATH  = os.path.join(BASE_DIR, "models", "tfidf_vectorizer.pkl")
+XGB_PATH    = os.path.join(BASE_DIR, "models", "xgboost_seeding.pkl")
+EMBED_PATH  = os.path.join(BASE_DIR, "models", "sbert_embeddings.npy")
+
+# Feature columns that match the notebook's build_features output
+FEATURE_COLS = [
+    'text_len', 'word_count', 'exclamation_count', 'emoji_count',
+    'caps_ratio', 'has_price', 'has_recommend', 'has_negative',
+    'unique_char_ratio', 'avg_word_len', 'vocab_richness',
+    'reviewer_review_count', 'reviewer_photo_count',
+    'low_review_count', 'low_photo_count', 'new_reviewer',
+    'perfect_from_new', 'rating', 'rating_5'
+]
+
+def build_features(df):
+    """Mirror the notebook's build_features; expects columns: text, rating, reviewer_review_count, reviewer_photo_count."""
+    df = df.copy()
+    text = df['text'].astype(str)
+
+    df['text_len']          = text.str.len()
+    df['word_count']        = text.str.split().str.len()
+    df['exclamation_count'] = text.str.count('!')
+    df['emoji_count']       = text.apply(lambda t: len(re.findall(
+        r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF☀-⛿]', t)))
+    df['caps_ratio']        = text.apply(lambda t: sum(1 for c in t if c.isupper()) / max(len(t), 1))
+    df['has_price']         = text.str.contains(r'\d+[kK]|đồng|vnd|giá', case=False).astype(int)
+    df['has_recommend']     = text.str.contains(
+        r'recommend|gợi ý|giới thiệu|nên thử|must|highly', case=False).astype(int)
+    df['has_negative']      = text.str.contains(
+        r'tệ|dở|chán|thất vọng|không ngon|bad|terrible|worst|awful', case=False).astype(int)
+    df['unique_char_ratio'] = text.apply(lambda t: len(set(t)) / max(len(t), 1))
+    df['avg_word_len']      = text.apply(
+        lambda t: np.mean([len(w) for w in t.split()]) if t.split() else 0)
+    df['vocab_richness']    = text.apply(
+        lambda t: len(set(t.lower().split())) / max(len(t.split()), 1))
+    df['low_review_count']  = (df['reviewer_review_count'] < 5).astype(int)
+    df['low_photo_count']   = (df['reviewer_photo_count'] < 5).astype(int)
+    df['new_reviewer']      = ((df['reviewer_review_count'] < 5) &
+                                (df['reviewer_photo_count'] < 5)).astype(int)
+    df['perfect_from_new']  = ((df['rating'] == 5) & (df['new_reviewer'] == 1)).astype(int)
+    df['rating_5']          = (df['rating'] == 5).astype(int)
+    return df
 
 @st.cache_resource
 def load_sbert_model():
-    """Load Vietnamese SBERT SentenceTransformer model."""
     return SentenceTransformer('keepitreal/vietnamese-sbert')
 
 @st.cache_resource
-def load_ml_pipeline():
-    """Load trained RandomForest model and StandardScaler using joblib."""
-    rf_model = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
-    return rf_model, scaler
+def load_rf_pipeline():
+    return joblib.load(MODEL_PATH), joblib.load(SCALER_PATH)
+
+@st.cache_resource
+def load_xgb_pipeline():
+    return joblib.load(TFIDF_PATH), joblib.load(XGB_PATH)
+
+def _predict_rf(df, texts, precomputed_embeddings=None):
+    """SBERT + Random Forest prediction. Returns prob array.
+    Pass precomputed_embeddings to skip SBERT inference (used for the CSV dataset)."""
+    rf_model, scaler = load_rf_pipeline()
+    if precomputed_embeddings is not None:
+        embeddings = precomputed_embeddings
+    else:
+        sbert = load_sbert_model()
+        embeddings = sbert.encode(texts, batch_size=64, show_progress_bar=False)
+    numeric = np.stack([
+        pd.to_numeric(df['review_rating'], errors='coerce').fillna(3).values,
+        pd.to_numeric(df['reviewer_total_reviews'], errors='coerce').fillna(5).values,
+    ], axis=1)
+    features = np.hstack([embeddings, scaler.transform(numeric)])
+    return rf_model.predict_proba(features)[:, 1]
+
+def _predict_xgb(df, texts):
+    """TF-IDF + XGBoost prediction. Returns prob array."""
+    tfidf, xgb = load_xgb_pipeline()
+    tmp = pd.DataFrame({
+        'text':                  texts,
+        'rating':                pd.to_numeric(df['review_rating'], errors='coerce').fillna(3),
+        'reviewer_review_count': pd.to_numeric(df['reviewer_total_reviews'], errors='coerce').fillna(5),
+        'reviewer_photo_count':  0,
+    })
+    tmp = build_features(tmp)
+    X = hstack([tfidf.transform(tmp['text'].astype(str)),
+                csr_matrix(tmp[FEATURE_COLS].fillna(0).values)])
+    return xgb.predict_proba(X)[:, 1]
+
 
 @st.cache_data
 def load_and_predict_dataset():
-    """
-    Load reviews from CSV and pre-compute predictions for all records.
-    Precompute SBERT + scaling + RandomForest. Cached to make selection instant.
-    """
     df = pd.read_csv(CSV_PATH)
-    
-    # Load model and encoders inside the cached loader
-    rf_model, scaler = load_ml_pipeline()
-    sbert = load_sbert_model()
-    
-    # Pre-process text features
     texts = df['review_text'].fillna("").tolist()
-    embeddings = sbert.encode(texts, batch_size=64, show_progress_bar=False)
-    
-    # Pre-process numerical features
-    numeric_features = np.stack([
-        df['review_rating'].values, 
-        df['reviewer_total_reviews'].values
-    ], axis=1)
-    scaled_numeric = scaler.transform(numeric_features)
-    
-    # Concatenate features [text, numeric] to match Combo A structure
-    features = np.hstack([embeddings, scaled_numeric])
-    
-    # Predict seeding flags and probabilities
-    df['is_fake'] = rf_model.predict(features)
-    df['fake_prob'] = rf_model.predict_proba(features)[:, 1]
-    
+
+    precomputed = np.load(EMBED_PATH) if os.path.exists(EMBED_PATH) else None
+
+    prob_rf  = _predict_rf(df, texts, precomputed_embeddings=precomputed)
+    prob_xgb = _predict_xgb(df, texts)
+
+    df['prob_rf']       = prob_rf
+    df['prob_xgb']      = prob_xgb
+    df['prob_ensemble'] = (prob_rf + prob_xgb) / 2
+    # defaults (overridden at display time based on user's model choice)
+    df['is_fake']   = (df['prob_ensemble'] >= 0.5).astype(int)
+    df['fake_prob'] = df['prob_ensemble']
     return df
 
 # Initialize models and data
@@ -155,28 +215,16 @@ with st.spinner("🕵️‍♂️ Đang nạp cơ sở dữ liệu thám tử v�
         st.stop()
 
 def predict_new_reviews(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Chạy SBERT + Random Forest trên DataFrame mới từ Apify.
-    Trả về DataFrame có thêm cột is_fake và fake_prob.
-    """
-    rf_model, scaler = load_ml_pipeline()
-    sbert = load_sbert_model()
-
+    """Run both models on freshly crawled reviews, store all 3 prob columns."""
     df = df_raw.copy()
-    df['review_text'] = df['review_text'].fillna("")
-    df['review_rating'] = pd.to_numeric(df['review_rating'], errors='coerce').fillna(3)
-    df['reviewer_total_reviews'] = pd.to_numeric(df['reviewer_total_reviews'], errors='coerce').fillna(5)
-
-    embeddings = sbert.encode(df['review_text'].tolist(), batch_size=32, show_progress_bar=False)
-    numeric_features = np.stack([
-        df['review_rating'].values,
-        df['reviewer_total_reviews'].values
-    ], axis=1)
-    scaled_numeric = scaler.transform(numeric_features)
-
-    features = np.hstack([embeddings, scaled_numeric])
-    df['is_fake'] = rf_model.predict(features)
-    df['fake_prob'] = rf_model.predict_proba(features)[:, 1]
+    texts = df['review_text'].fillna("").tolist()
+    prob_rf  = _predict_rf(df, texts)
+    prob_xgb = _predict_xgb(df, texts)
+    df['prob_rf']       = prob_rf
+    df['prob_xgb']      = prob_xgb
+    df['prob_ensemble'] = (prob_rf + prob_xgb) / 2
+    df['is_fake']   = (df['prob_ensemble'] >= 0.5).astype(int)
+    df['fake_prob'] = df['prob_ensemble']
     return df
 
 # Session state cho các quán đã crawl realtime
@@ -195,20 +243,15 @@ restaurant_list = sorted(df_all['restaurant_name'].unique().tolist())
 # 3. LLM AGENT INTEGRATION (WITH MOCK RESPONSE)
 # -----------------------------------------------------------------------------
 def call_llm_agent(restaurant_name, fake_ratio, alternative_restaurant=None):
-    """
-    Simulates or calls an LLM agent with a "funny, witty, foodie detective" persona.
-    Includes placeholder templates for OpenAI and Google Gemini APIs.
-    """
-    
-    system_prompt = """Bạn là "Thám tử ẩm thực TrustBite" - một chuyên gia đánh giá quán ăn cực kỳ xéo xắt, hài hước, đa nghi và có đôi mắt cú vọ chuyên vạch trần các chiêu trò seeding (đánh giá ảo).
-Nhiệm vụ của bạn là đưa ra lời khuyên cho người dùng dựa trên tên quán ăn, tỷ lệ đánh giá ảo (seeding ratio) và tên quán ăn thay thế đề xuất (nếu có).
+    system_prompt = """Bạn là hệ thống phân tích đánh giá nhà hàng TrustBite.
+Nhiệm vụ: đưa ra nhận xét ngắn gọn, khách quan về mức độ tin cậy của đánh giá tại một quán ăn dựa trên tỷ lệ review ảo (seeding) được phát hiện bởi mô hình ML.
 
-Quy tắc ứng xử:
-1. Giọng văn hài hước, châm biếm, sử dụng ngôn ngữ trẻ trung, dí dỏm của giới trẻ Việt Nam (ví dụ: "quay xe", "ét ô ét", "seeding lòi mắt", "bánh vẽ", "phong vị", v.v.).
-2. Nếu tỷ lệ seeding cao (trên 20%): Phải khuyên khách "quay xe" gấp, châm chọc việc quán thuê đội seeding viết review 5 sao sáo rỗng, và tích cực giới thiệu quán ăn thay thế đề xuất để cứu rỗi chiếc bụng đói của họ.
-3. Nếu tỷ lệ seeding thấp (dưới hoặc bằng 20%): Khuyên khách an tâm đi ăn ngon miệng, khen ngợi quán làm ăn chân chính (nhưng vẫn giữ giọng điệu dí dỏm, không quá nghiêm túc).
-4. Phản hồi bằng tiếng Việt sinh động, định dạng Markdown rõ ràng, dễ đọc.
-"""
+Quy tắc:
+1. Phản hồi bằng tiếng Việt, ngắn gọn, không dùng ngôn ngữ hài hước hay biệt ngữ mạng.
+2. Nêu rõ mức độ rủi ro (thấp / trung bình / cao) và lý do ngắn gọn.
+3. Nếu tỷ lệ seeding cao (> 20%): khuyên người dùng thận trọng và đề xuất quán thay thế nếu có.
+4. Nếu tỷ lệ seeding thấp (≤ 20%): xác nhận quán có vẻ đáng tin cậy.
+5. Không quá 5 câu. Định dạng Markdown đơn giản."""
 
     user_prompt = f"""
 Thông tin quét quán ăn:
@@ -217,46 +260,53 @@ Thông tin quét quán ăn:
 - Quán ăn đề xuất thay thế: {alternative_restaurant if alternative_restaurant else 'Không có'}
 """
 
-    # =========================================================================
-    # GOOGLE GEMINI 2.5 FLASH API
-    # Đọc API key từ file .env (local) hoặc biến môi trường (production)
-    # =========================================================================
-    API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY", "")
-
     def _mock_response():
-        """Phản hồi dự phòng khi API lỗi."""
         if fake_ratio > 20:
-            return f"""### 🕵️‍♂️ LỜI KHUYÊN TỪ THÁM TỬ: **QUAY XE GẤP!!!** 🚨
-
-Trời đất cản ngăn ơi! **{fake_ratio:.1f}%** review ảo? Quán này không phải đang bán đồ ăn nữa rồi, họ đang bán "bánh vẽ" và bán "content" đó!
-
-Tôi đã soi kỹ các review bị cắm cờ, toàn kiểu văn mẫu ngọt ngào đến sâu răng lặp đi lặp lại như đĩa vỡ. Seeding lộ liễu thế này mà cũng duyệt được, tôi đánh giá tổ biên kịch seeding này 1 điểm về chỗ!
-
-**Lời khuyên:** Đừng để các Tiktoker dắt mũi nữa bạn ơi! Hãy quay xe ngay lập tức trước khi chiếc ví và chiếc dạ dày phải khóc thét.
-
-👉 **Gợi ý quán thay thế cực tín:** Hãy chuyển sang **{alternative_restaurant}** liền! Tỷ lệ đánh giá ảo cực thấp, khách ăn thật, bình luận thật.
-"""
+            alt = f" Có thể cân nhắc **{alternative_restaurant}** như một lựa chọn thay thế." if alternative_restaurant else ""
+            return (
+                f"**Mức độ rủi ro: Cao** — {fake_ratio:.1f}% đánh giá bị phát hiện là seeding.\n\n"
+                f"Tỷ lệ này vượt ngưỡng an toàn, cho thấy quán có thể đang sử dụng dịch vụ đánh giá ảo. "
+                f"Người dùng nên thận trọng khi tham khảo các đánh giá tại đây.{alt}"
+            )
         else:
-            return f"""### 🕵️‍♂️ LỜI KHUYÊN TỪ THÁM TỬ: **MÚC NGAY CHỜ CHI!** 🟢
+            return (
+                f"**Mức độ rủi ro: Thấp** — chỉ {fake_ratio:.1f}% đánh giá bị gắn cờ seeding.\n\n"
+                f"Phần lớn đánh giá tại **{restaurant_name}** có vẻ tự nhiên và đáng tin cậy."
+            )
 
-A ha! Quán **{restaurant_name}** này vượt qua bài kiểm tra cực kỳ thuyết phục! Tỷ lệ seeding chỉ vỏn vẹn **{fake_ratio:.1f}%** (nằm sâu dưới ngưỡng an toàn 20%).
+    # ── 1. Claude (Anthropic) ────────────────────────────────────────────────
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+    if ANTHROPIC_API_KEY:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            response = client.messages.create(
+                model="claude-opus-4-8",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}]
+            )
+            return response.content[0].text
+        except Exception as err:
+            claude_err = err  # fall through to Gemini
 
-Hầu hết đánh giá đều là người dùng thật, khen có khen, chê có chê — đó chính là tấm chứng chỉ uy tín của quán làm ăn chân chính.
+    # ── 2. Google Gemini ─────────────────────────────────────────────────────
+    API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY", "")
+    if API_KEY_GEMINI:
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=API_KEY_GEMINI)
+            gemini_model = genai.GenerativeModel(
+                model_name="gemini-2.5-flash",
+                system_instruction=system_prompt
+            )
+            response = gemini_model.generate_content(user_prompt)
+            return response.text
+        except Exception as err:
+            pass  # fall through to mock
 
-**Lời khuyên:** Lên đồ, dắt xe ra và đi ăn ngay thôi bạn ơi! Chúc bạn bữa ăn ngon miệng và không bị "hố" nhé! 🍜✨
-"""
-
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=API_KEY_GEMINI)
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=system_prompt
-        )
-        response = model.generate_content(user_prompt)
-        return response.text
-    except Exception as err:
-        return f"⚠️ **Lỗi Gemini API:** `{err}`\n\n---\n\n" + _mock_response()
+    # ── 3. Mock fallback ─────────────────────────────────────────────────────
+    return _mock_response()
 
 # -----------------------------------------------------------------------------
 # 4. INITIAL INTERFACE & SIDEBAR INPUTS
@@ -295,12 +345,25 @@ with st.sidebar:
         step=5,
         help="Nếu tỷ lệ review ảo lớn hơn ngưỡng này, hệ thống sẽ đề xuất quay xe và đổi quán."
     )
-    
-    # Informative guide
-    st.info(
-        "💡 **Cách hoạt động:** Mô hình Random Forest sẽ kết hợp Vector SBERT từ review text "
-        "cùng với số sao (rating) và số lượng review của tài khoản để phát hiện seeding trong tích tắc."
+
+    model_choice = st.radio(
+        "Mô hình phân loại:",
+        options=["ensemble", "xgb", "rf"],
+        format_func=lambda x: {
+            "ensemble": "🔀 Ensemble (trung bình cả 2)",
+            "xgb":      "⚡ TF-IDF + XGBoost",
+            "rf":       "🧠 SBERT + Random Forest",
+        }[x],
+        help="Ensemble lấy trung bình xác suất của cả 2 mô hình."
     )
+
+    # Informative guide
+    _model_desc = {
+        "ensemble": "Ensemble: trung bình xác suất của **SBERT + Random Forest** và **TF-IDF + XGBoost**.",
+        "xgb":      "**TF-IDF + XGBoost** — char n-gram + 19 đặc trưng hành vi reviewer.",
+        "rf":       "**SBERT + Random Forest** — vector ngữ nghĩa tiếng Việt + rating/reviewer count.",
+    }
+    st.info("💡 " + _model_desc[model_choice])
 
     # -------------------------------------------------------------------------
     # CRAWL QUÁN MỚI (REALTIME - Option A + C)
@@ -371,8 +434,11 @@ if scan_clicked:
 # 5. ML PROCESSING AND SUGGESTION LOGIC
 # -----------------------------------------------------------------------------
 if st.session_state.scanned_restaurant is not None:
-    # Filter records for selected restaurant
-    df_restaurant = df_all[df_all['restaurant_name'] == st.session_state.scanned_restaurant]
+    # Filter records for selected restaurant and apply chosen model
+    _prob_col = {"ensemble": "prob_ensemble", "xgb": "prob_xgb", "rf": "prob_rf"}[model_choice]
+    df_restaurant = df_all[df_all['restaurant_name'] == st.session_state.scanned_restaurant].copy()
+    df_restaurant['fake_prob'] = df_restaurant[_prob_col]
+    df_restaurant['is_fake']   = (df_restaurant[_prob_col] >= 0.5).astype(int)
     total_reviews = len(df_restaurant)
     
     # Simulated Scanning Animation (for premium user experience)
