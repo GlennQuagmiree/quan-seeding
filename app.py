@@ -14,6 +14,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from sentence_transformers import SentenceTransformer
+from crawler import crawl_restaurant, is_cached_today
 
 # -----------------------------------------------------------------------------
 # 1. UI/UX CONFIGURATION & PREMIUM STYLING
@@ -153,7 +154,41 @@ with st.spinner("🕵️‍♂️ Đang nạp cơ sở dữ liệu thám tử v�
         st.error(f"Lỗi khi tải mô hình hoặc dữ liệu: {e}")
         st.stop()
 
-# Get the list of unique restaurants
+def predict_new_reviews(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Chạy SBERT + Random Forest trên DataFrame mới từ Apify.
+    Trả về DataFrame có thêm cột is_fake và fake_prob.
+    """
+    rf_model, scaler = load_ml_pipeline()
+    sbert = load_sbert_model()
+
+    df = df_raw.copy()
+    df['review_text'] = df['review_text'].fillna("")
+    df['review_rating'] = pd.to_numeric(df['review_rating'], errors='coerce').fillna(3)
+    df['reviewer_total_reviews'] = pd.to_numeric(df['reviewer_total_reviews'], errors='coerce').fillna(5)
+
+    embeddings = sbert.encode(df['review_text'].tolist(), batch_size=32, show_progress_bar=False)
+    numeric_features = np.stack([
+        df['review_rating'].values,
+        df['reviewer_total_reviews'].values
+    ], axis=1)
+    scaled_numeric = scaler.transform(numeric_features)
+
+    features = np.hstack([embeddings, scaled_numeric])
+    df['is_fake'] = rf_model.predict(features)
+    df['fake_prob'] = rf_model.predict_proba(features)[:, 1]
+    return df
+
+# Session state cho các quán đã crawl realtime
+if 'crawled_predicted' not in st.session_state:
+    st.session_state.crawled_predicted = {}   # {restaurant_name: DataFrame}
+
+# Merge crawled data vào df_all nếu có
+if st.session_state.crawled_predicted:
+    extra_dfs = list(st.session_state.crawled_predicted.values())
+    df_all = pd.concat([df_all] + extra_dfs, ignore_index=True)
+
+# Get the list of unique restaurants (bao gồm cả crawled)
 restaurant_list = sorted(df_all['restaurant_name'].unique().tolist())
 
 # -----------------------------------------------------------------------------
@@ -266,6 +301,54 @@ with st.sidebar:
         "💡 **Cách hoạt động:** Mô hình Random Forest sẽ kết hợp Vector SBERT từ review text "
         "cùng với số sao (rating) và số lượng review của tài khoản để phát hiện seeding trong tích tắc."
     )
+
+    # -------------------------------------------------------------------------
+    # CRAWL QUÁN MỚI (REALTIME - Option A + C)
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    with st.expander("🌐 Quét quán mới (Realtime)", expanded=False):
+        st.caption(
+            "Nhập tên quán ở Hà Nội để crawl review qua Apify và phân tích ngay. "
+            "Kết quả được cache 24h, lần sau chọn lại sẽ trả ngay."
+        )
+        new_restaurant_input = st.text_input(
+            "Tên quán ăn:",
+            placeholder="VD: Gà Rán Popeyes Lê Văn Lương",
+            key="new_restaurant_input"
+        )
+        crawl_btn = st.button(
+            "🔍 Crawl & Phân tích",
+            key="crawl_btn",
+            use_container_width=True
+        )
+
+        if crawl_btn and new_restaurant_input.strip():
+            name = new_restaurant_input.strip()
+            from_cache = is_cached_today(name)
+            label = " *(từ cache)*" if from_cache else ""
+            with st.spinner(f"⏳ Đang crawl{label} reviews cho **{name}**..."):
+                try:
+                    df_crawled = crawl_restaurant(name)
+                    df_predicted = predict_new_reviews(df_crawled)
+                    st.session_state.crawled_predicted[name] = df_predicted
+                    st.success(
+                        f"✅ Đã thêm **{name}** ({len(df_predicted)} reviews). "
+                        "Chọn quán ở trên để phân tích!"
+                    )
+                    st.rerun()
+                except Exception as crawl_err:
+                    st.error(f"❌ Lỗi crawl: {crawl_err}")
+        elif crawl_btn:
+            st.warning("⚠️ Vui lòng nhập tên quán ăn trước khi bấm Crawl.")
+
+        # Hiện danh sách quán đã crawl trong phiên này
+        if st.session_state.crawled_predicted:
+            st.markdown("**📊 Đã crawl trong phiên này:**")
+            for rname, rdf in st.session_state.crawled_predicted.items():
+                from_cache = is_cached_today(rname)
+                badge = " 📂" if from_cache else " ✨ mới"
+                st.caption(f"  • {rname} — {len(rdf)} reviews{badge}")
+
 
 st.markdown("---")
 

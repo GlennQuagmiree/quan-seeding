@@ -25,6 +25,9 @@ streamlit_output.log
 .env.local
 .env.*.local
 
+# Cache crawl data (dữ liệu tạm, không cần push)
+cache/
+
 # OS
 .DS_Store
 Thumbs.db
