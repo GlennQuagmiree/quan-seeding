@@ -76,7 +76,16 @@ streamlit run app.py
 └── .streamlit/
     └── config.toml
 ```
+Phân Công
 
+| Thành viên | Phụ trách |
+|---|---|
+| **Tất cả thành viên** | Thu thập dữ liệu, crawl Google Maps, xây dựng dataset `reviews_ha_noi_output.csv`; viết `crawler.py` tích hợp Apify |
+| **Hà Kế Trung Đức - 2A202600594** | Huấn luyện mô hình ML: Random Forest + SBERT (`seeding_review_classifier.ipynb`); tối ưu feature engineering |
+| **Lâm Văn Tài - 2A202600938** | Xây dựng giao diện Streamlit (`app.py`): UI/UX, sidebar, chart, custom CSS; tích hợp LLM Agent Gemini/Anthropic; cải thiện UX crawl realtime (auto-select quán mới sau crawl, chèn lên đầu danh sách) |
+| **Đặng Thị Thu Thảo - 2A202600685** | Xây dựng giao diện Streamlit (`app.py`): UI/UX, dark mode, custom CSS; bổ sung safety layer: input validation, keyword blocklist chặn non-restaurant và nội dung nhạy cảm, prompt injection guard cho LLM Agent |
+| **Nguyễn Đăng Huy - 2A202600641** | Huấn luyện mô hình XGBoost + TF-IDF; đánh giá ensemble; viết kịch bản demo |
+| **Tất cả thành viên** | Viết SPEC, kiểm thử end-to-end, chuẩn bị slides demo |
 ## 🛡️ Lưu Ý Bảo Mật
 
 - **Không** commit `.env` hoặc `secrets.toml` lên GitHub
