@@ -20,6 +20,11 @@ streamlit_output.log
 # Streamlit secrets (KHÔNG push secrets lên GitHub!)
 .streamlit/secrets.toml
 
+# Environment variables (KHÔNG push lên GitHub!)
+.env
+.env.local
+.env.*.local
+
 # OS
 .DS_Store
 Thumbs.db

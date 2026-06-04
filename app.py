@@ -1,5 +1,7 @@
 import os
 import time
+from dotenv import load_dotenv
+load_dotenv()  # Load biến từ file .env
 import joblib
 import pandas as pd
 import numpy as np
@@ -175,9 +177,9 @@ Thông tin quét quán ăn:
 
     # =========================================================================
     # GOOGLE GEMINI 2.5 FLASH API
-    # Đọc API key từ Streamlit secrets (khi deploy) hoặc biến môi trường (khi chạy local)
+    # Đọc API key từ file .env (local) hoặc biến môi trường (production)
     # =========================================================================
-    API_KEY_GEMINI = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else os.environ.get("GEMINI_API_KEY", "")
+    API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY", "")
 
     def _mock_response():
         """Phản hồi dự phòng khi API lỗi."""
