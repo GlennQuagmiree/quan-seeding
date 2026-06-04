@@ -154,6 +154,14 @@ _NON_RESTAURANT_KW = [
     'sân bay', 'airport', 'bến xe',
 ]
 
+# Từ khóa nội dung nhạy cảm / bạo lực — chặn trước khi gọi bất kỳ model nào
+_BLOCKED_KW = [
+    'thịt người', 'người', 'xác người', 'tử thi', 'cannibalism',
+    'human meat', 'ma túy', 'drug', 'súng', 'gun', 'bom', 'bomb',
+    'khủng bố', 'terror', 'tự tử', 'suicide', 'giết người', 'murder',
+    'hiếp dâm', 'rape', 'sex', 'porn', 'khiêu dâm',
+]
+
 def validate_restaurant_name(name: str) -> tuple:
     n = name.strip()
     if len(n) < 3:
@@ -161,6 +169,11 @@ def validate_restaurant_name(name: str) -> tuple:
     if not re.search(r'[a-zA-ZÀ-ỹ]', n):
         return False, "Tên không hợp lệ. Chỉ nhập tên quán ăn / nhà hàng."
     n_lower = n.lower()
+    # Chặn nội dung nhạy cảm / bạo lực trước tiên
+    for kw in _BLOCKED_KW:
+        if kw in n_lower:
+            return False, "⛔ Nội dung không được phép. TrustBite chỉ phân tích quán ăn hợp lệ."
+    # Chặn địa điểm không phải quán ăn
     for kw in _NON_RESTAURANT_KW:
         if kw in n_lower:
             return False, (
@@ -201,11 +214,13 @@ def _predict_rf(df, texts, precomputed_embeddings=None):
 def _predict_xgb(df, texts):
     """TF-IDF + XGBoost prediction. Returns prob array."""
     tfidf, xgb = load_xgb_pipeline()
+    # Dùng reviewer_photo_count thực nếu có trong df, fallback về median 3
+    photo_col = pd.to_numeric(df.get('reviewer_photo_count', pd.Series(dtype=float)), errors='coerce').fillna(3)
     tmp = pd.DataFrame({
         'text':                  texts,
         'rating':                pd.to_numeric(df['review_rating'], errors='coerce').fillna(3),
         'reviewer_review_count': pd.to_numeric(df['reviewer_total_reviews'], errors='coerce').fillna(5),
-        'reviewer_photo_count':  0,
+        'reviewer_photo_count':  photo_col.values,
     })
     tmp = build_features(tmp)
     X = hstack([tfidf.transform(tmp['text'].astype(str)),
@@ -302,10 +317,14 @@ Quy tắc:
 5. Không quá 5 câu. Định dạng Markdown đơn giản.
 6. Luôn kết thúc bằng disclaimer bắt buộc theo Safety Rule #3."""
 
+    # Sanitize: cắt ngắn, loại bỏ ký tự xuống dòng để chống prompt injection
+    safe_name = re.sub(r'[\r\n]+', ' ', restaurant_name.strip())[:150]
+    safe_alt  = re.sub(r'[\r\n]+', ' ', alternative_restaurant.strip())[:150] if alternative_restaurant else 'Không có'
+
     user_prompt = f"""
-Địa điểm đang kiểm tra: {restaurant_name}
+Địa điểm đang kiểm tra: {safe_name}
 Tỷ lệ đánh giá ảo (Seeding): {fake_ratio:.2f}%
-Quán ăn đề xuất thay thế: {alternative_restaurant if alternative_restaurant else 'Không có'}
+Quán ăn đề xuất thay thế: {safe_alt}
 
 Hãy thực hiện Bước 1 trước: xác định đây có phải là quán ăn/nhà hàng không. Nếu không, dừng và thông báo ngay.
 """
@@ -331,14 +350,16 @@ Hãy thực hiện Bước 1 trước: xác định đây có phải là quán �
             import anthropic
             client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
             response = client.messages.create(
-                model="claude-opus-4-8",
+                model="claude-opus-4-6",
                 max_tokens=1024,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}]
             )
             return response.content[0].text
         except Exception as err:
-            claude_err = err  # fall through to Gemini
+            import sys
+            print(f"[TrustBite] Claude API error: {err}", file=sys.stderr)
+            # fall through to Gemini
 
     # ── 2. Google Gemini ─────────────────────────────────────────────────────
     API_KEY_GEMINI = os.environ.get("GEMINI_API_KEY", "")
